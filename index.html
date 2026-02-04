@@ -1,1 +1,906 @@
+<!doctype html>
+<html lang="en" class="h-full">
+ <head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Parkour Boss Battle: Enraged Edition</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/_sdk/element_sdk.js"></script>
+  <style>
+    body { box-sizing: border-box; }
+    canvas { display: block; }
+    .health-bar { transition: width 0.2s ease-out; }
+  </style>
+  <style>@view-transition { navigation: auto; }</style>
+  <script src="/_sdk/data_sdk.js" type="text/javascript"></script>
+ </head>
+ <body class="h-full m-0 p-0 overflow-hidden font-mono bg-slate-950">
+  <div id="game-container" class="h-full w-full relative select-none"><!-- Start Screen -->
+   <div id="start-screen" class="absolute inset-0 flex flex-col items-center justify-center z-50 bg-slate-900 text-white">
+    <h1 id="game-title" class="text-6xl font-bold mb-4 text-cyan-400 drop-shadow-[0_0_15px_rgba(34,211,238,0.8)]">BOSS ARENA</h1>
+    <p class="mb-8 text-slate-400 text-center">Survive the Ancient Terror.<br>
+     Arrow Keys to Move. Space to Dodge.</p><button id="start-btn" class="bg-cyan-500 hover:bg-cyan-400 text-slate-900 px-12 py-4 rounded-full font-black text-2xl transition-transform hover:scale-110">START</button>
+   </div><!-- HUD -->
+   <div id="hud" class="absolute top-4 left-4 right-4 hidden z-40 flex justify-between">
+    <div class="w-64">
+     <div class="text-cyan-400 text-xs mb-1">
+      PLAYER VITALITY
+     </div>
+     <div class="h-4 bg-slate-800 border border-cyan-500 rounded-full overflow-hidden">
+      <div id="player-hp" class="health-bar h-full bg-cyan-500 w-full"></div>
+     </div>
+    </div>
+    <div class="w-64">
+     <div class="text-red-500 text-xs mb-1 text-right">
+      ANCIENT TERROR
+     </div>
+     <div class="h-4 bg-slate-800 border border-red-500 rounded-full overflow-hidden">
+      <div id="boss-hp" class="health-bar h-full bg-red-600 w-full"></div>
+     </div>
+    </div>
+   </div><!-- Death Screen -->
+   <div id="death-screen" class="absolute inset-0 hidden flex-col items-center justify-center z-50 bg-black/80">
+    <h2 class="text-7xl text-red-600 font-black mb-8">YOU PERISHED</h2><button id="retry-btn" class="border-2 border-red-600 text-red-600 px-10 py-3 hover:bg-red-600 hover:text-white transition-colors">RETRY</button>
+   </div><!-- Victory Screen -->
+   <div id="victory-screen" class="absolute inset-0 hidden flex-col items-center justify-center z-50 bg-black/80">
+    <h2 class="text-7xl text-yellow-400 font-black mb-4">VICTORY!</h2>
+    <p class="text-2xl text-yellow-300 mb-8">You defeated the Ancient Terror!</p><button id="playagain-btn" class="border-2 border-yellow-400 text-yellow-400 px-10 py-3 hover:bg-yellow-400 hover:text-black transition-colors">PLAY AGAIN</button>
+   </div>
+   <canvas id="game-canvas"></canvas>
+  </div>
+  <script>
+    // Config and SDK Setup
+    const defaultConfig = {
+      game_title: 'BOSS ARENA',
+      level_difficulty: '3'
+    };
 
+    let config = { ...defaultConfig };
+
+    function applyConfig() {
+      const titleEl = document.getElementById('game-title');
+      if (titleEl) {
+        titleEl.textContent = config.game_title || defaultConfig.game_title;
+      }
+    }
+
+    if (window.elementSdk) {
+      window.elementSdk.init({
+        defaultConfig,
+        onConfigChange: async (newConfig) => {
+          config = { ...newConfig };
+          applyConfig();
+        },
+        mapToCapabilities: (cfg) => ({
+          recolorables: [],
+          borderables: [],
+          fontEditable: undefined,
+          fontSizeable: undefined
+        }),
+        mapToEditPanelValues: (cfg) => new Map([
+          ['game_title', cfg.game_title || defaultConfig.game_title]
+        ])
+      });
+      config = window.elementSdk.config || defaultConfig;
+    }
+
+    applyConfig();
+
+    // Game Canvas Setup
+    const canvas = document.getElementById('game-canvas');
+    const ctx = canvas.getContext('2d');
+    
+    let gameState = 'start';
+    let animationFrameId = null;
+    
+    const ARENA = {
+      x: 0,
+      y: 0,
+      w: 1600,
+      h: 800
+    };
+
+    const player = {
+      x: 100, y: 400, w: 30, h: 30,
+      vx: 0, vy: 0, 
+      hp: 100, maxHp: 100,
+      speed: 5,
+      dodging: false,
+      dodgeTimer: 0,
+      invincible: 0,
+      onGround: false,
+      lastJumpPressed: false,
+      jumpsRemaining: 2,
+      maxJumps: 2,
+      shielding: false,
+      shieldTimer: 0,
+      shieldRadius: 50
+    };
+
+    const boss = {
+      x: 740, y: 350, w: 120, h: 120,
+      vx: 0, vy: 0, hp: 400, maxHp: 400,
+      active: false,
+      attackTimer: 0,
+      currentAttack: 0,
+      attackCooldown: 0,
+      phase: 1,
+      dashDirection: 0,
+      dashActive: false,
+      dashTimer: 0,
+      godMode: false,
+      orbSpawnTimer: 0,
+      orbSpawnInterval: 402
+    };
+
+    let projectiles = [];
+    let particles = [];
+    let shockwaves = [];
+    let iceSpikes = [];
+    let missiles = [];
+    let damageOrbs = [];
+
+    // Platforms
+    const platforms = [
+      { x: 100, y: 650, w: 200, h: 20 },     // Left lower
+      { x: 1300, y: 650, w: 200, h: 20 },    // Right lower
+      { x: 400, y: 550, w: 180, h: 20 },     // Left middle
+      { x: 1020, y: 550, w: 180, h: 20 },    // Right middle
+      { x: 700, y: 450, w: 200, h: 20 },     // Center upper
+      { x: 200, y: 400, w: 150, h: 20 },     // Left upper
+      { x: 1250, y: 400, w: 150, h: 20 }     // Right upper
+    ];
+
+    const keys = {};
+    window.addEventListener('keydown', e => {
+      keys[e.code] = true;
+      if (e.code === 'Space' && gameState === 'playing') {
+        // Check if shield can intercept a projectile
+        let hitProjectile = false;
+        for (let i = 0; i < projectiles.length; i++) {
+          const p = projectiles[i];
+          const dist = Math.sqrt((p.x - (player.x + player.w/2))**2 + (p.y - (player.y + player.h/2))**2);
+          if (dist < player.shieldRadius + p.r) {
+            // Reflect projectile
+            const angle = Math.atan2(p.y - (player.y + player.h/2), p.x - (player.x + player.w/2));
+            const speed = Math.sqrt(p.vx**2 + p.vy**2);
+            p.vx = Math.cos(angle + Math.PI) * speed * 1.2; // Reverse and boost
+            p.vy = Math.sin(angle + Math.PI) * speed * 1.2;
+            createParticles(p.x, p.y, '#00ff00', 20);
+            hitProjectile = true;
+          }
+        }
+        
+        // If no projectile hit, do dodge
+        if (!hitProjectile && !player.dodging) {
+          player.dodging = true;
+          player.dodgeTimer = 30;
+        }
+        
+        // Activate shield visual
+        player.shielding = true;
+        player.shieldTimer = 20;
+      }
+    });
+    window.addEventListener('keyup', e => keys[e.code] = false);
+
+    function checkCollision(r1, r2) {
+      return r1.x < r2.x + r2.w && r1.x + r1.w > r2.x &&
+             r1.y < r2.y + r2.h && r1.y + r1.h > r2.y;
+    }
+
+    function createParticles(x, y, color, count = 10) {
+      for (let i = 0; i < count; i++) {
+        particles.push({
+          x: x,
+          y: y,
+          vx: (Math.random() - 0.5) * 8,
+          vy: (Math.random() - 0.5) * 8 - 2,
+          life: 1,
+          color: color,
+          size: Math.random() * 6 + 2
+        });
+      }
+    }
+
+    function bossAttack1_Dash() {
+      // Dash charge toward player
+      if (boss.dashActive) {
+        boss.x += Math.cos(boss.dashDirection) * (boss.godMode ? 10 : 6);
+        boss.y += Math.sin(boss.dashDirection) * (boss.godMode ? 10 : 6);
+        boss.dashTimer++;
+        
+        const dashDuration = boss.godMode ? 50 : 40;
+        if (boss.dashTimer > dashDuration) {
+          boss.dashActive = false;
+          boss.dashTimer = 0;
+          boss.attackCooldown = boss.godMode ? 50 : 80;
+        }
+        
+        // God mode trail
+        if (boss.godMode && boss.dashTimer % 3 === 0) {
+          createParticles(boss.x + 60, boss.y + 60, '#ffff00', 5);
+        }
+      } else {
+        // Start dash
+        const dx = player.x - boss.x;
+        const dy = player.y - boss.y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        boss.dashDirection = Math.atan2(dy, dx);
+        boss.dashActive = true;
+        createParticles(boss.x + 60, boss.y + 60, boss.godMode ? '#ffff00' : '#ef4444', 20);
+      }
+    }
+
+    function bossAttack2_Projectiles() {
+      // Spray projectiles in cone
+      const projectileCount = boss.godMode ? 8 : 5;
+      for (let i = 0; i < projectileCount; i++) {
+        const angle = (i - (projectileCount - 1) / 2) * 0.3 + Math.atan2(player.y - boss.y, player.x - boss.x);
+        projectiles.push({
+          x: boss.x + 60,
+          y: boss.y + 60,
+          vx: Math.cos(angle) * (boss.godMode ? 6.5 : 5),
+          vy: Math.sin(angle) * (boss.godMode ? 6.5 : 5),
+          r: boss.godMode ? 10 : 8,
+          color: boss.godMode ? '#ffff00' : '#f87171'
+        });
+      }
+      boss.attackCooldown = boss.godMode ? 20 : 35;
+    }
+
+    function bossAttack3_Shockwave() {
+      // Ground shockwave that radiates outward
+      shockwaves.push({
+        x: boss.x + 60,
+        y: boss.y + 60,
+        radius: 10,
+        maxRadius: boss.godMode ? 600 : 400,
+        damage: true,
+        expandSpeed: boss.godMode ? 10 : 6
+      });
+      createParticles(boss.x + 60, boss.y + 60, boss.godMode ? '#ffff00' : '#fbbf24', 40);
+      boss.attackCooldown = boss.godMode ? 80 : 100;
+    }
+
+    function bossAttack4_IceSpikes() {
+      // Summon ice spikes around arena
+      const spikeCount = boss.godMode ? 10 : 6;
+      const angleStep = (Math.PI * 2) / spikeCount;
+      
+      for (let i = 0; i < spikeCount; i++) {
+        const angle = angleStep * i;
+        const radius = 500;
+        const x = ARENA.x + ARENA.w / 2 + Math.cos(angle) * radius;
+        const y = ARENA.y + ARENA.h / 2 + Math.sin(angle) * radius;
+        
+        iceSpikes.push({
+          x: x,
+          y: y,
+          w: boss.godMode ? 60 : 40,
+          h: boss.godMode ? 120 : 80,
+          life: boss.godMode ? 200 : 180,
+          active: false,
+          growTimer: boss.godMode ? 10 : 20,
+          damage: boss.godMode ? 75 : 50
+        });
+      }
+      createParticles(boss.x + 60, boss.y + 60, '#67e8f9', 35);
+      boss.attackCooldown = boss.godMode ? 100 : 120;
+    }
+
+    function bossAttack5_Missile() {
+      // Launch homing missiles
+      const missileCount = boss.godMode ? 3 : 1;
+      for (let i = 0; i < missileCount; i++) {
+        missiles.push({
+          x: boss.x + 60,
+          y: boss.y + 60,
+          vx: 0,
+          vy: 0,
+          speed: boss.godMode ? 5 : 3,
+          r: boss.godMode ? 13 : 10,
+          life: boss.godMode ? 500 : 600,
+          active: true,
+          damage: boss.godMode ? 98 : 99
+        });
+      }
+      createParticles(boss.x + 60, boss.y + 60, boss.godMode ? '#ffff00' : '#fbbf24', 40);
+      boss.attackCooldown = boss.godMode ? 120 : 150;
+    }
+
+    function update() {
+      if (gameState !== 'playing') return;
+
+      // Player Movement
+      if (keys['ArrowLeft'] || keys['KeyA']) player.vx = -player.speed;
+      else if (keys['ArrowRight'] || keys['KeyD']) player.vx = player.speed;
+      else player.vx *= 0.85;
+
+      player.x += player.vx;
+
+      // Jump
+      const jumpKey = keys['Space'] || keys['ArrowUp'] || keys['KeyW'];
+      if (jumpKey && !player.lastJumpPressed) {
+        if (player.jumpsRemaining > 0) {
+          player.vy = -12;
+          player.jumpsRemaining--;
+          if (player.onGround) {
+            player.onGround = false;
+          }
+        }
+      }
+      player.lastJumpPressed = jumpKey;
+
+      // Gravity
+      player.vy += 0.5;
+      player.y += player.vy;
+
+      // Arena bounds
+      player.x = Math.max(ARENA.x, Math.min(player.x, ARENA.w - player.w));
+
+      // Ground collision
+      player.onGround = false;
+      if (player.y >= ARENA.h - player.h) {
+        player.y = ARENA.h - player.h;
+        player.vy = 0;
+        player.onGround = true;
+        player.jumpsRemaining = player.maxJumps;
+      }
+
+      // Platform collision
+      platforms.forEach(platform => {
+        if (player.vy > 0 && 
+            player.y + player.h <= platform.y + 10 &&
+            player.y + player.h + player.vy >= platform.y &&
+            player.x + player.w > platform.x &&
+            player.x < platform.x + platform.w) {
+          player.y = platform.y - player.h;
+          player.vy = 0;
+          player.onGround = true;
+          player.jumpsRemaining = player.maxJumps;
+        }
+      });
+
+      // Dodge mechanic
+      if (player.dodging) {
+        player.dodgeTimer--;
+        if (player.dodgeTimer <= 0) {
+          player.dodging = false;
+          player.invincible = 0; // End invincibility when dodge ends
+        }
+      }
+      
+      // Shield gives invincibility while active
+      if (player.shielding) {
+        player.invincible = Math.max(player.invincible, player.shieldTimer);
+      }
+
+      // Boss AI
+      if (boss.active) {
+        boss.attackCooldown--;
+        boss.orbSpawnTimer++;
+
+        // Spawn damage orb periodically
+        if (boss.orbSpawnTimer >= boss.orbSpawnInterval) {
+          damageOrbs.push({
+            x: boss.x + boss.w / 2,
+            y: boss.y - 30,
+            r: 8,
+            active: true,
+            hitCooldown: 0
+          });
+          boss.orbSpawnTimer = 0;
+        }
+
+        if (boss.attackCooldown <= 0) {
+          boss.currentAttack = Math.floor(Math.random() * 5);
+          
+          if (boss.currentAttack === 0) bossAttack1_Dash();
+          else if (boss.currentAttack === 1) bossAttack2_Projectiles();
+          else if (boss.currentAttack === 2) bossAttack3_Shockwave();
+          else if (boss.currentAttack === 3) bossAttack4_IceSpikes();
+          else if (boss.currentAttack === 4) bossAttack5_Missile();
+        }
+
+        // Boss movement - chase player when not dashing
+        if (!boss.dashActive) {
+          const dx = player.x + player.w/2 - (boss.x + boss.w/2);
+          const dy = player.y + player.h/2 - (boss.y + boss.h/2);
+          const dist = Math.sqrt(dx*dx + dy*dy);
+          
+          if (dist > 0) {
+            boss.vx = (dx / dist) * 2;
+            boss.vy = (dy / dist) * 2;
+          }
+        }
+
+        boss.x += boss.vx;
+        boss.y += boss.vy;
+
+        // Continue dash if active
+        if (boss.dashActive) {
+          bossAttack1_Dash();
+        }
+
+        // Collision with player (both dash and general contact)
+        if (checkCollision(player, boss)) {
+          if (player.dodging) {
+            // Dodging negates boss damage
+            createParticles(player.x + player.w/2, player.y + player.h/2, '#00ff00', 8);
+          } else if (player.shielding) {
+            // Shield negates boss damage
+            createParticles(player.x + player.w/2, player.y + player.h/2, '#00ff00', 8);
+          } else if (player.invincible <= 0) {
+            const damage = boss.dashActive ? 60 : 25;
+            player.hp -= damage;
+            player.invincible = 30;
+            createParticles(player.x + player.w/2, player.y + player.h/2, '#22d3ee', 15);
+          }
+        }
+
+        // Jump on boss = damage ONLY if hitting an orb
+        // (orbs are the only way to damage the boss now)
+
+        // Keep boss in bounds
+        boss.x = Math.max(ARENA.x, Math.min(boss.x, ARENA.w - boss.w));
+        boss.y = Math.max(ARENA.y + 100, Math.min(boss.y, ARENA.h - boss.h));
+      }
+
+      // Projectiles
+      projectiles = projectiles.filter(p => {
+        p.x += p.vx;
+        p.y += p.vy;
+        
+        // Out of bounds
+        if (p.x < ARENA.x || p.x > ARENA.w || p.y < ARENA.y || p.y > ARENA.h) return false;
+        
+        // Hit player
+        if (checkCollision(player, {x: p.x - p.r, y: p.y - p.r, w: p.r*2, h: p.r*2})) {
+          if (player.dodging) {
+            // Dodging completely negates damage
+            createParticles(player.x + player.w/2, player.y + player.h/2, '#00ff00', 8);
+          } else if (player.shielding) {
+            // Shield negates damage
+            createParticles(player.x + player.w/2, player.y + player.h/2, '#00ff00', 8);
+          } else if (player.invincible <= 0) {
+            player.hp -= 30;
+            player.invincible = 30;
+            createParticles(player.x + player.w/2, player.y + player.h/2, '#22d3ee', 10);
+          }
+          return false;
+        }
+        return true;
+      });
+
+      // Shockwaves
+      shockwaves = shockwaves.filter(sw => {
+        sw.radius += sw.expandSpeed || 6;
+        
+        // Hit player
+        const distToPlayer = Math.sqrt((player.x + player.w/2 - sw.x)**2 + (player.y + player.h/2 - sw.y)**2);
+        if (sw.damage && distToPlayer < sw.radius && distToPlayer > sw.radius - 30) {
+          if (player.dodging) {
+            // Dodging negates shockwave
+            createParticles(player.x + player.w/2, player.y + player.h/2, '#00ff00', 8);
+          } else if (player.shielding) {
+            // Shield negates shockwave
+            createParticles(player.x + player.w/2, player.y + player.h/2, '#00ff00', 8);
+          } else if (player.invincible <= 0) {
+            player.hp -= boss.godMode ? 75 : 45;
+            player.invincible = 30;
+            createParticles(player.x + player.w/2, player.y + player.h/2, '#22d3ee', 12);
+          }
+          sw.damage = false;
+        }
+        
+        return sw.radius < sw.maxRadius;
+      });
+
+      // Ice Spikes
+      iceSpikes.forEach(spike => {
+        if (spike.growTimer > 0) {
+          spike.growTimer--;
+          spike.active = spike.growTimer === 0;
+        }
+        
+        if (spike.active) {
+          spike.life--;
+          if (checkCollision(player, spike)) {
+            if (player.dodging) {
+              // Dodging negates spike damage
+              createParticles(spike.x + spike.w/2, spike.y + spike.h/2, '#00ff00', 8);
+            } else if (player.shielding) {
+              // Shield negates spike damage
+              createParticles(spike.x + spike.w/2, spike.y + spike.h/2, '#00ff00', 8);
+            } else if (player.invincible <= 0) {
+              player.hp -= spike.damage || 50;
+              player.invincible = 30;
+              createParticles(spike.x + spike.w/2, spike.y + spike.h/2, '#67e8f9', 15);
+            }
+          }
+        }
+      });
+
+      iceSpikes = iceSpikes.filter(s => s.life > 0);
+
+      // Damage Orbs - player can hit to damage boss
+      damageOrbs = damageOrbs.filter(orb => {
+        if (!orb.active) {
+          // Orb is hidden, count down to respawn
+          orb.respawnTimer--;
+          if (orb.respawnTimer <= 0) {
+            orb.active = true;
+            orb.respawnTimer = 0;
+          }
+          return true; // Keep orb in array while hidden
+        }
+
+        // Check collision with player
+        if (checkCollision(player, {x: orb.x - orb.r, y: orb.y - orb.r, w: orb.r*2, h: orb.r*2})) {
+          boss.hp -= 60;
+          orb.active = false;
+          orb.respawnTimer = 120; // 120 frames (2 seconds) until respawn
+          createParticles(orb.x, orb.y, '#00ff00', 15);
+          return true;
+        }
+
+        return true;
+      });
+
+      // Missiles - homing and collision
+      missiles = missiles.filter(m => {
+        if (!m.active) return false;
+        
+        m.life--;
+        if (m.life <= 0) return false;
+        
+        // Home toward player
+        const dx = player.x + player.w/2 - m.x;
+        const dy = player.y + player.h/2 - m.y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        
+        if (dist > 0) {
+          m.vx = (dx / dist) * m.speed;
+          m.vy = (dy / dist) * m.speed;
+        }
+        
+        m.x += m.vx;
+        m.y += m.vy;
+        
+        // Out of bounds
+        if (m.x < ARENA.x || m.x > ARENA.w || m.y < ARENA.y || m.y > ARENA.h) return false;
+        
+        // Hit player - 99% or 98% damage based on mode
+        if (checkCollision(player, {x: m.x - m.r, y: m.y - m.r, w: m.r*2, h: m.r*2})) {
+          if (player.dodging) {
+            // Dodging negates missile
+            createParticles(player.x + player.w/2, player.y + player.h/2, '#00ff00', 8);
+          } else if (player.shielding) {
+            // Shield negates missile
+            createParticles(player.x + player.w/2, player.y + player.h/2, '#00ff00', 8);
+          } else if (player.invincible <= 0) {
+            const damagePercent = m.damage || 99;
+            player.hp -= Math.ceil(player.maxHp * (damagePercent / 100));
+            player.invincible = 30;
+            createParticles(player.x + player.w/2, player.y + player.h/2, '#facc15', 20);
+          }
+          return false;
+        }
+        
+        // Hit boss
+        if (checkCollision({x: m.x - m.r, y: m.y - m.r, w: m.r*2, h: m.r*2}, boss)) {
+          boss.hp -= 40;
+          createParticles(m.x, m.y, '#fbbf24', 25);
+          return false;
+        }
+        
+        // Hit platforms
+        for (let platform of platforms) {
+          if (checkCollision({x: m.x - m.r, y: m.y - m.r, w: m.r*2, h: m.r*2}, platform)) {
+            createParticles(m.x, m.y, '#fbbf24', 25);
+            return false;
+          }
+        }
+        
+        return true;
+      });
+
+      // Particles
+      particles = particles.filter(p => {
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += 0.2;
+        p.life -= 0.02;
+        return p.life > 0;
+      });
+
+      if (player.invincible > 0) player.invincible--;
+
+      // Damage boss when jumping on it (not used, but kept for structure)
+      if (keys['Enter'] && boss.active) {
+        boss.hp -= 5;
+        createParticles(boss.x + 60, boss.y + 60, '#ef4444', 10);
+      }
+
+      // Phase 2 at 50% HP
+      if (boss.hp < 200) boss.phase = 2;
+
+      // God Mode at 50% HP - dramatic transformation
+      if (boss.hp < 200 && !boss.godMode) {
+        boss.godMode = true;
+        // Reset spawn timer so orb spawns more frequently in god mode
+        boss.orbSpawnInterval = 268; // Faster spawning (4.5 seconds)
+        createParticles(boss.x + boss.w/2, boss.y + boss.h/2, '#ffff00', 100);
+      } else if (boss.hp >= 200 && boss.godMode) {
+        boss.godMode = false;
+        boss.orbSpawnInterval = 402; // Normal spawn rate (6.7 seconds)
+      }
+
+      // UI Update
+      document.getElementById('player-hp').style.width = player.hp + '%';
+      document.getElementById('boss-hp').style.width = (boss.hp / boss.maxHp * 100) + '%';
+
+      if (player.hp <= 0) {
+        gameState = 'over';
+        document.getElementById('death-screen').style.display = 'flex';
+        if (animationFrameId) cancelAnimationFrame(animationFrameId);
+      }
+      if (boss.hp <= 0) {
+        gameState = 'victory';
+        document.getElementById('victory-screen').style.display = 'flex';
+        createParticles(boss.x + 60, boss.y + 60, '#facc15', 50);
+        if (animationFrameId) cancelAnimationFrame(animationFrameId);
+      }
+    }
+
+    function drawParticles() {
+      particles.forEach(p => {
+        ctx.globalAlpha = p.life;
+        ctx.fillStyle = p.color;
+        ctx.fillRect(p.x, p.y, p.size, p.size);
+      });
+      ctx.globalAlpha = 1;
+    }
+
+    function draw() {
+      ctx.fillStyle = boss.godMode ? '#1a1a2e' : '#0f172a';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Draw Arena
+      ctx.fillStyle = boss.godMode ? '#2d2d44' : '#1e293b';
+      ctx.fillRect(ARENA.x, ARENA.y, ARENA.w, ARENA.h);
+      ctx.strokeStyle = boss.godMode ? '#ffff00' : '#475569';
+      ctx.lineWidth = boss.godMode ? 6 : 4;
+      ctx.strokeRect(ARENA.x, ARENA.y, ARENA.w, ARENA.h);
+
+      // God Mode arena effect
+      if (boss.godMode) {
+        ctx.strokeStyle = 'rgba(255, 255, 0, 0.3)';
+        ctx.lineWidth = 2;
+        for (let i = 1; i < 4; i++) {
+          const offset = (i * 30) % 100;
+          ctx.strokeRect(ARENA.x + offset, ARENA.y + offset, ARENA.w - offset*2, ARENA.h - offset*2);
+        }
+      }
+
+      // Draw Platforms
+      ctx.fillStyle = '#334155';
+      ctx.strokeStyle = '#64748b';
+      ctx.lineWidth = 2;
+      platforms.forEach(platform => {
+        ctx.fillRect(platform.x, platform.y, platform.w, platform.h);
+        ctx.strokeRect(platform.x, platform.y, platform.w, platform.h);
+      });
+
+      // Draw Shockwaves
+      shockwaves.forEach(sw => {
+        ctx.strokeStyle = `rgba(251, 191, 36, ${1 - sw.radius / sw.maxRadius})`;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(sw.x, sw.y, sw.radius, 0, Math.PI * 2);
+        ctx.stroke();
+      });
+
+      // Draw Ice Spikes
+      iceSpikes.forEach(spike => {
+        const alpha = spike.active ? 1 : spike.growTimer / 20;
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = '#67e8f9';
+        ctx.beginPath();
+        ctx.moveTo(spike.x + spike.w/2, spike.y);
+        ctx.lineTo(spike.x, spike.y + spike.h);
+        ctx.lineTo(spike.x + spike.w, spike.y + spike.h);
+        ctx.closePath();
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      });
+
+      // Draw Projectiles
+      projectiles.forEach(p => {
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI*2);
+        ctx.fill();
+      });
+
+      // Draw Missiles
+      missiles.forEach(m => {
+        ctx.fillStyle = '#fbbf24';
+        ctx.beginPath();
+        ctx.arc(m.x, m.y, m.r, 0, Math.PI*2);
+        ctx.fill();
+        
+        // Missile glow
+        ctx.strokeStyle = 'rgba(251, 191, 36, 0.5)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(m.x, m.y, m.r + 5, 0, Math.PI*2);
+        ctx.stroke();
+      });
+
+      // Draw Damage Orbs
+      damageOrbs.forEach(orb => {
+        if (orb.active) {
+          ctx.fillStyle = '#00ff00';
+          ctx.beginPath();
+          ctx.arc(orb.x, orb.y, orb.r, 0, Math.PI*2);
+          ctx.fill();
+          
+          // Orb glow
+          ctx.strokeStyle = 'rgba(0, 255, 0, 0.8)';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(orb.x, orb.y, orb.r + 4, 0, Math.PI*2);
+          ctx.stroke();
+        }
+      });
+
+      // Draw Player
+      if (player.invincible > 0 && Math.floor(player.invincible / 5) % 2 === 0) {
+        ctx.globalAlpha = 0.5;
+      }
+      ctx.fillStyle = player.dodging ? '#06b6d4' : '#22d3ee';
+      ctx.fillRect(player.x, player.y, player.w, player.h);
+      
+      // Shield visual
+      if (player.shielding) {
+        const shieldAlpha = player.shieldTimer / 20;
+        ctx.globalAlpha = shieldAlpha * 0.7;
+        ctx.strokeStyle = '#00ff00';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(player.x + player.w/2, player.y + player.h/2, player.shieldRadius, 0, Math.PI*2);
+        ctx.stroke();
+        
+        // Shield glow
+        ctx.globalAlpha = shieldAlpha * 0.3;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(player.x + player.w/2, player.y + player.h/2, player.shieldRadius + 8, 0, Math.PI*2);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        
+        player.shieldTimer--;
+        if (player.shieldTimer <= 0) {
+          player.shielding = false;
+        }
+      }
+      
+      // Dodge indicator
+      if (player.dodging) {
+        ctx.strokeStyle = '#06b6d4';
+        ctx.lineWidth = 3;
+        ctx.strokeRect(player.x - 5, player.y - 5, player.w + 10, player.h + 10);
+      }
+      ctx.globalAlpha = 1;
+
+      // Draw Boss
+      if (boss.active) {
+        ctx.fillStyle = boss.godMode ? '#ffff00' : (boss.phase === 2 ? '#ef4444' : '#991b1b');
+        ctx.fillRect(boss.x, boss.y, boss.w, boss.h);
+        
+        // Eyes
+        ctx.fillStyle = boss.godMode ? '#0066ff' : 'yellow';
+        ctx.fillRect(boss.x + 20, boss.y + 30, 20, 20);
+        ctx.fillRect(boss.x + 80, boss.y + 30, 20, 20);
+        
+        // God Mode aura - intense blue glow
+        if (boss.godMode) {
+          ctx.shadowColor = 'rgba(0, 102, 255, 0.8)';
+          ctx.shadowBlur = 30;
+          ctx.strokeStyle = 'rgba(0, 102, 255, 0.8)';
+          ctx.lineWidth = 4;
+          ctx.strokeRect(boss.x - 10, boss.y - 10, boss.w + 20, boss.h + 20);
+          ctx.shadowBlur = 0;
+          
+          // Extra glow rings
+          ctx.strokeStyle = 'rgba(255, 255, 0, 0.5)';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(boss.x - 20, boss.y - 20, boss.w + 40, boss.h + 40);
+        }
+        // Phase 2 aura
+        else if (boss.phase === 2) {
+          ctx.strokeStyle = 'rgba(239, 68, 68, 0.6)';
+          ctx.lineWidth = 3;
+          ctx.strokeRect(boss.x - 8, boss.y - 8, boss.w + 16, boss.h + 16);
+        }
+      }
+
+      drawParticles();
+    }
+
+    function loop() {
+      update();
+      draw();
+      animationFrameId = requestAnimationFrame(loop);
+    }
+
+    function resize() {
+      canvas.width = Math.min(window.innerWidth, 1600);
+      canvas.height = Math.min(window.innerHeight, 800);
+    }
+
+    window.addEventListener('resize', resize);
+    resize();
+
+    function startGame() {
+      document.getElementById('start-screen').style.display = 'none';
+      document.getElementById('hud').classList.remove('hidden');
+      gameState = 'playing';
+      boss.active = true;
+      loop();
+    }
+
+    function resetGame() {
+      if (animationFrameId) cancelAnimationFrame(animationFrameId);
+      animationFrameId = null;
+      gameState = 'start';
+      
+      player.x = 100;
+      player.y = 400;
+      player.vx = 0;
+      player.vy = 0;
+      player.hp = 100;
+      player.dodging = false;
+      player.dodgeTimer = 0;
+      player.invincible = 0;
+      player.onGround = true;
+      player.lastJumpPressed = false;
+      player.jumpsRemaining = player.maxJumps;
+      player.shielding = false;
+      player.shieldTimer = 0;
+
+      boss.x = 740;
+      boss.y = 350;
+      boss.vx = 0;
+      boss.vy = 0;
+      boss.hp = 400;
+      boss.active = false;
+      boss.attackCooldown = 0;
+      boss.phase = 1;
+      boss.dashActive = false;
+      boss.godMode = false;
+      boss.orbSpawnTimer = 0;
+
+      projectiles = [];
+      particles = [];
+      shockwaves = [];
+      iceSpikes = [];
+      missiles = [];
+      damageOrbs = [];
+
+      document.getElementById('start-screen').style.display = 'flex';
+      document.getElementById('hud').classList.add('hidden');
+      document.getElementById('death-screen').style.display = 'none';
+      document.getElementById('victory-screen').style.display = 'none';
+
+      startGame();
+    }
+
+    document.getElementById('start-btn').onclick = startGame;
+    document.getElementById('retry-btn').onclick = resetGame;
+    document.getElementById('playagain-btn').onclick = resetGame;
+  </script>
+ <script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'9c8daddfc3f0a0f4',t:'MTc3MDI0NDkyNS4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</html>
